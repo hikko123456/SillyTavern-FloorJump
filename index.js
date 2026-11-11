@@ -1,6 +1,6 @@
-// SillyTavern 楼层跳转 Floor Jump
+// SillyTavern 楼层跳转 Floor Jump v1.1.0
 const MODULE = 'floorJump';
-const DEFAULTS = { showFab: true, smooth: true, fabPos: null };
+const DEFAULTS = { showFab: true, smooth: true, oneBased: false, fabPos: null };
 
 const ctx = () => SillyTavern.getContext();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -18,14 +18,27 @@ function settings() {
 const save = () => ctx().saveSettingsDebounced();
 const toast = (msg, type = 'info') => window.toastr?.[type]?.(msg, '楼层跳转');
 
-/* ---------- 楼层工具 ---------- */
+/* ---------- 楼层编号 ---------- */
+// 内部一律用酒馆的 mesid（从 0 开始）；显示/输入时按设置换算
+const base = () => (settings().oneBased ? 1 : 0);
+const show = (id) => id + base();
+
 const getMes = (id) => document.querySelector(`#chat .mes[mesid="${id}"]`);
 const lastId = () => (ctx().chat?.length ?? 0) - 1;
 const mesCount = () => document.querySelectorAll('#chat .mes').length;
+const chatEl = () => document.getElementById('chat');
 
-// 当前视口顶部的楼层
+// 用户输入 -> 内部 mesid。支持 "22"、"#22"、"-1"（最后一楼）
+function resolveInput(raw) {
+    const n = parseInt(String(raw ?? '').trim().replace(/^#/, ''), 10);
+    if (Number.isNaN(n)) return null;
+    const max = lastId();
+    return clamp(n < 0 ? max + 1 + n : n - base(), 0, max);
+}
+
+// 视口顶部当前所在楼层（内部 mesid）
 function currentId() {
-    const chat = document.getElementById('chat');
+    const chat = chatEl();
     if (!chat) return 0;
     const top = chat.getBoundingClientRect().top;
     for (const m of chat.querySelectorAll('.mes')) {
@@ -34,55 +47,74 @@ function currentId() {
     return lastId();
 }
 
-// 解析输入：支持 "25"、"#25"、"-1"（倒数第一）
-function resolveId(raw) {
-    const n = parseInt(String(raw ?? '').trim().replace(/^#/, ''), 10);
-    if (Number.isNaN(n)) return null;
-    const max = lastId();
-    return clamp(n < 0 ? max + 1 + n : n, 0, max);
-}
-
-// 酒馆默认只渲染最近 N 楼；目标未加载时反复点击"显示更多消息"
+// 目标楼层还没渲染时，反复点"显示更多消息"
 async function ensureLoaded(id) {
+    let clicked = false;
     for (let round = 0; round < 1000; round++) {
-        const el = getMes(id);
-        if (el) return el;
+        if (getMes(id)) break;
         const more = document.getElementById('show_more_messages');
-        if (!more) return null;
+        if (!more) break;
         const before = mesCount();
         more.click();
+        clicked = true;
         let changed = false;
         for (let t = 0; t < 60; t++) {
             await sleep(50);
             if (mesCount() !== before) { changed = true; break; }
         }
-        if (!changed) return getMes(id); // 加载卡住，放弃
+        if (!changed) break;
     }
+    if (clicked) await sleep(300); // 等酒馆自己的滚动调整结束，避免它覆盖我们的位置
     return getMes(id);
+}
+
+/* ---------- 精确滚动 ---------- */
+async function scrollToMes(el) {
+    const chat = chatEl();
+    const offset = () => el.getBoundingClientRect().top - chat.getBoundingClientRect().top;
+    const target = () => chat.scrollTop + offset();
+
+    if (settings().smooth) {
+        chat.scrollTo({ top: target(), behavior: 'smooth' });
+        await sleep(600);
+    }
+    // 纠偏：图片加载、页面重排可能把位置挤走，反复校正几次
+    for (let i = 0; i < 6; i++) {
+        if (Math.abs(offset()) > 3) chat.scrollTo({ top: target(), behavior: 'auto' });
+        await sleep(120);
+    }
 }
 
 /* ---------- 跳转 ---------- */
 let busy = false;
-async function jumpTo(raw) {
+
+async function jumpToId(id) {
     if (busy) return false;
     if (lastId() < 0) { toast('当前没有打开的聊天', 'warning'); return false; }
-    const id = resolveId(raw);
-    if (id === null) { toast('请输入有效的楼层号', 'warning'); return false; }
+    id = clamp(id, 0, lastId());
 
     busy = true;
     try {
         const el = await ensureLoaded(id);
-        if (!el) { toast(`没找到第 ${id} 楼`, 'error'); return false; }
-        el.scrollIntoView({ behavior: settings().smooth ? 'smooth' : 'auto', block: 'start' });
+        if (!el) { toast(`没找到 #${show(id)}`, 'error'); return false; }
+        await scrollToMes(el);
         el.classList.remove('fj-highlight');
-        void el.offsetWidth; // 重启动画
+        void el.offsetWidth;
         el.classList.add('fj-highlight');
         setTimeout(() => el.classList.remove('fj-highlight'), 2000);
+        toast(`已跳转到 #${show(id)}`, 'success');
         updateInfo(id);
         return true;
     } finally {
         busy = false;
     }
+}
+
+function jumpToInput(raw) {
+    if (lastId() < 0) { toast('当前没有打开的聊天', 'warning'); return false; }
+    const id = resolveInput(raw);
+    if (id === null) { toast('请输入有效的楼层号', 'warning'); return false; }
+    return jumpToId(id);
 }
 
 /* ---------- 面板 ---------- */
@@ -115,14 +147,14 @@ function buildPanel() {
     input = panel.querySelector('#fj-input');
     range = panel.querySelector('#fj-range');
 
-    panel.querySelector('#fj-go').addEventListener('click', () => jumpTo(input.value));
+    panel.querySelector('#fj-go').addEventListener('click', () => jumpToInput(input.value));
     panel.querySelector('.fj-close').addEventListener('click', hidePanel);
     input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') { e.preventDefault(); jumpTo(input.value); }
+        if (e.key === 'Enter') { e.preventDefault(); jumpToInput(input.value); }
         if (e.key === 'Escape') hidePanel();
     });
     range.addEventListener('input', () => { input.value = range.value; });
-    range.addEventListener('change', () => jumpTo(range.value));
+    range.addEventListener('change', () => jumpToInput(range.value));
 
     panel.querySelectorAll('[data-act]').forEach((btn) => {
         btn.addEventListener('click', () => {
@@ -130,11 +162,11 @@ function buildPanel() {
             const max = lastId();
             const target = {
                 first: 0,
-                prev: Math.max(cur - 1, 0),
-                next: Math.min(cur + 1, max),
+                prev: cur - 1,
+                next: cur + 1,
                 last: max,
             }[btn.dataset.act];
-            jumpTo(target);
+            jumpToId(clamp(target, 0, max));
         });
     });
 }
@@ -142,16 +174,17 @@ function buildPanel() {
 function updateInfo(cur = currentId()) {
     if (!panel) return;
     const max = Math.max(lastId(), 0);
-    panel.querySelector('#fj-info').textContent = `第 ${cur} 楼 / 共 ${max} 楼`;
-    range.max = String(max);
-    range.value = String(cur);
+    panel.querySelector('#fj-info').textContent = `当前 #${show(cur)} / 最后 #${show(max)}`;
+    range.min = String(show(0));
+    range.max = String(show(max));
+    range.value = String(show(cur));
 }
 
 function showPanel() {
     updateInfo();
     input.value = '';
     panel.style.display = 'block';
-    if (!matchMedia('(pointer: coarse)').matches) input.focus(); // 手机上不自动弹键盘
+    if (!matchMedia('(pointer: coarse)').matches) input.focus();
 }
 function hidePanel() { if (panel) panel.style.display = 'none'; }
 function togglePanel() { panel.style.display === 'block' ? hidePanel() : showPanel(); }
@@ -236,6 +269,7 @@ function buildSettings() {
             <div class="inline-drawer-content">
                 <label class="checkbox_label"><input id="fj-set-fab" type="checkbox"><span>显示悬浮按钮</span></label>
                 <label class="checkbox_label"><input id="fj-set-smooth" type="checkbox"><span>平滑滚动</span></label>
+                <label class="checkbox_label"><input id="fj-set-onebased" type="checkbox"><span>开场白算第 1 楼（关闭时与酒馆 #编号一致，开场白 = #0）</span></label>
                 <div id="fj-set-reset" class="menu_button">重置悬浮按钮位置</div>
                 <small>斜杠命令：<code>/floor 楼层号</code>，负数从末尾数，如 <code>/floor -1</code></small>
             </div>
@@ -250,6 +284,9 @@ function buildSettings() {
     $('#fj-set-smooth').prop('checked', s.smooth).on('change', function () {
         settings().smooth = this.checked; save();
     });
+    $('#fj-set-onebased').prop('checked', s.oneBased).on('change', function () {
+        settings().oneBased = this.checked; save(); updateInfo();
+    });
     $('#fj-set-reset').on('click', () => {
         settings().fabPos = null; save(); applyFab(); toast('已重置', 'success');
     });
@@ -258,7 +295,7 @@ function buildSettings() {
 /* ---------- 斜杠命令 ---------- */
 function registerCommand() {
     const c = ctx();
-    const callback = async (_args, value) => { await jumpTo(value); return ''; };
+    const callback = async (_args, value) => { await jumpToInput(value); return ''; };
     try {
         c.SlashCommandParser.addCommandObject(c.SlashCommand.fromProps({
             name: 'floor',
@@ -271,10 +308,9 @@ function registerCommand() {
                     isRequired: true,
                 }),
             ],
-            helpString: '跳转到指定楼层。例：<code>/floor 25</code>、<code>/floor -1</code>',
+            helpString: '跳转到指定楼层。例：<code>/floor 22</code>、<code>/floor -1</code>',
         }));
     } catch (e) {
-        // 旧版酒馆兼容
         c.registerSlashCommand?.('floor', callback, ['jumpto'], '跳转到指定楼层', true, true);
     }
 }
@@ -288,5 +324,5 @@ jQuery(() => {
     buildSettings();
     registerCommand();
     ctx().eventSource.on(ctx().event_types.CHAT_CHANGED, hidePanel);
-    console.log('[FloorJump] loaded');
+    console.log('[FloorJump] v1.1.0 loaded');
 });
