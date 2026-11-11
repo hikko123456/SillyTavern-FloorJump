@@ -1,0 +1,12 @@
+{
+    "display_name": "Floor Jump 楼层跳转",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "你的GitHub用户名",
+    "version": "1.0.0",
+    "homePage": "https://github.com/你的GitHub用户名/SillyTavern-FloorJump",
+    "auto_update": true
+}
